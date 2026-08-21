@@ -60,10 +60,9 @@
 
 ### 📲 Приложение
 
-| Чат | Еда | Активность | Здоровье | Советы |
-|:--:|:--:|:--:|:--:|:--:|
-| <img src="docs/images/app-chat.jpg" width="175"> | <img src="docs/images/app-eat.jpg" width="175"> | <img src="docs/images/app-burn.jpg" width="175"> | <img src="docs/images/app-health.jpg" width="175"> | <img src="docs/images/app-advice.jpg" width="175"> |
-| вопрос по своим данным | приёмы за день | активность и графики | готовность, HRV, сон | возможности и цель |
+<img src="docs/images/app-chat.jpg" width="175"> <img src="docs/images/app-eat.jpg" width="175"> <img src="docs/images/app-burn.jpg" width="175"> <img src="docs/images/app-health.jpg" width="175"> <img src="docs/images/app-advice.jpg" width="175">
+
+**Чат** — вопрос по своим данным · **Еда** — приёмы за день · **Активность** — графики за период · **Здоровье** — готовность, HRV, сон · **Советы** — возможности и цель
 
 ### 💬 Telegram
 
