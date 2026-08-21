@@ -1,0 +1,22 @@
+# Что и откуда собираем.
+#
+# Только /metrics бота: node_exporter и cadvisor не ставим — на 3.8 ГБ RAM
+# каждый лишний контейнер отнимает память у бота, а метрики хоста можно
+# посмотреть через htop, когда понадобится.
+global:
+  scrape_interval: 30s        # чаще незачем: трафик бота — единицы событий в час
+  scrape_timeout: 10s
+  external_labels:
+    project: health-bot
+
+scrape_configs:
+  - job_name: healthbot
+    metrics_path: /metrics
+    static_configs:
+      # api-контейнер в сети health-bot_default; отдаёт и свои счётчики,
+      # и счётчики бота через общий каталог PROMETHEUS_MULTIPROC_DIR
+      - targets: ["health-bot-api-1:8080"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

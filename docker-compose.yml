@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-healthbot}
+      POSTGRES_USER: ${POSTGRES_USER:-healthbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-healthbot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # наружу на другом порту, чтобы не конфликтовать с чужими Postgres.
+      # Если 5434 тоже занят — поменяй POSTGRES_EXPOSED_PORT в .env
+      - "${POSTGRES_EXPOSED_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-healthbot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build: .
+    # Общее имя образа для bot и api: Dockerfile один, но без явного image
+    # compose собирал ДВА одинаковых образа по 8.8 ГБ — 17.7 ГБ на диске
+    # вместо 8.8. Хуже того, они расходились по времени сборки, и код в
+    # контейнерах отличался. Теперь оба сервиса делят один образ.
+    image: health-bot:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      # Метрики из нескольких процессов: бот и api пишут счётчики в общий
+      # каталог, иначе /metrics на api показывал бы только свои — а вызовы
+      # моделей идут в контейнере бота.
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prom
+    volumes:
+      - prom_metrics:/tmp/prom
+      - hf_cache:/root/.cache/huggingface
+    # langfuse поднимается своим compose-файлом; сеть подключаем как внешнюю,
+    # чтобы бот видел langfuse-web по имени. Если Langfuse не запущен —
+    # трейсинг просто выключается, бот работает как раньше.
+    networks:
+      - default
+      - langfuse
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    image: health-bot:latest      # тот же образ, что у bot — см. комментарий выше
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prom
+    volumes:
+      - prom_metrics:/tmp/prom
+      - hf_cache:/root/.cache/huggingface
+    # keep-alive 120с: дефолтные 5с рвали «тёплые» соединения iOS-пула,
+    # и приложение ловило The network connection was lost (-1005)
+    command: uvicorn app.api:app --host 0.0.0.0 --port 8080 --timeout-keep-alive 120
+    ports:
+      - "${API_PORT:-8080}:8080"
+    # та же внешняя сеть Langfuse, что у бота: iOS/веб-чат ходят через api,
+    # и без неё их трейсы молча не доезжали (langfuse-web не резолвился)
+    networks:
+      - default
+      - langfuse
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Qdrant для базы знаний: панель на http://YOUR_SERVER_IP:6333/dashboard
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # без ключа панель и API доступны любому, кто знает адрес
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+    # без ограничения память тихо растёт на больших коллекциях, а сервер
+    # уже дважды упирался в ресурсы
+    mem_limit: 1g
+
+networks:
+  langfuse:
+    external: true
+    name: langfuse_default
+
+volumes:
+  hf_cache:
+  qdrant_data:
+  pgdata:
+  prom_metrics:

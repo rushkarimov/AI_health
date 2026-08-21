@@ -1,0 +1,197 @@
+# Langfuse v4 — трейсинг вызовов LLM.
+#
+#   docker compose -f docker-compose.langfuse.yml up -d
+#   открыть http://localhost:3000, создать аккаунт и проект
+#   ключи из проекта вписать в .env бота (LANGFUSE_PUBLIC_KEY / SECRET_KEY)
+#
+# Остановить, сохранив данные:   docker compose -f docker-compose.langfuse.yml stop
+# Удалить вместе с данными:      docker compose -f docker-compose.langfuse.yml down -v
+#
+# Почему отдельный файл, а не сервисы в основном docker-compose.yml:
+# шесть контейнеров нужны только для анализа трейсов, а бот должен подниматься
+# без них. Плюс у Langfuse свой Postgres — смешивать его с базой бота нельзя.
+#
+# Порты и имена томов с префиксом lf_, чтобы не столкнуться с health-bot.
+#
+# Лимиты памяти выставлены явно (суммарно ~2.1 ГБ при 3.8 ГБ на сервере):
+# при утечке контейнер умрёт сам, а не утянет бота через OOM killer. Если
+# Langfuse начнёт падать по памяти — это сигнал, что серверу нужно больше RAM,
+# а не повод снимать лимиты.
+
+name: langfuse
+
+services:
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:4
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 700M
+    depends_on: &lf-deps
+      lf-postgres:
+        condition: service_healthy
+      lf-clickhouse:
+        condition: service_healthy
+      lf-minio:
+        condition: service_healthy
+      lf-redis:
+        condition: service_healthy
+    environment: &lf-env
+      # Node не видит лимит cgroup и берёт heap от памяти хоста: раздувается,
+      # упирается в лимит контейнера и падает с 'JavaScript heap out of memory'.
+      # У worker это давало 85 перезапусков подряд, и трейсы не обрабатывались.
+      # Значение переопределяется у web — там нужен больший heap.
+      NODE_OPTIONS: --max-old-space-size=560
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_PG_PASSWORD:-langfuse}@lf-postgres:5432/langfuse
+      # Сгенерировать свои и положить в .env — эти значения шифруют
+      # ключи проектов и сессии, общими они быть не должны:
+      #   openssl rand -hex 16   → LANGFUSE_SALT
+      #   openssl rand -hex 32   → LANGFUSE_ENCRYPTION_KEY
+      #   openssl rand -hex 24   → LANGFUSE_NEXTAUTH_SECRET
+      SALT: ${LANGFUSE_SALT:?нужен LANGFUSE_SALT в .env}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?нужен LANGFUSE_ENCRYPTION_KEY в .env}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+
+      CLICKHOUSE_MIGRATION_URL: clickhouse://lf-clickhouse:9000
+      CLICKHOUSE_URL: http://lf-clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CH_PASSWORD:-langfuse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+      LANGFUSE_USE_AZURE_BLOB: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://lf-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://lf-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+      REDIS_HOST: lf-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: langfuse-redis
+      REDIS_TLS_ENABLED: "false"
+
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:4
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1400M
+    depends_on: *lf-deps
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      # Node не знает про лимит cgroup и берёт heap от памяти хоста —
+      # раздувается и падает с 'JavaScript heap out of memory'. Задаём явно.
+      #
+      # 1200 МБ подобраны опытом: на 768 Next.js всё равно падал на старте,
+      # хотя OOMKilled=false — падал сам V8, не cgroup. Лимит контейнера
+      # держим на 200 МБ выше heap: Node тратит память и вне кучи.
+      <<: *lf-env
+      # ПОСЛЕ слияния якоря: ключи до <<: перекрываются его значениями, и
+      # web получал бы heap 560 МБ вместо своих 1200 — а на 560 он падает.
+      NODE_OPTIONS: --max-old-space-size=1200
+      NEXTAUTH_URL: http://localhost:${LANGFUSE_PORT:-3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?нужен LANGFUSE_NEXTAUTH_SECRET в .env}
+      # регистрация нужна один раз, чтобы создать аккаунт и проект
+      AUTH_DISABLE_SIGNUP: "false"
+
+  lf-clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # 768M хватало на 4ГБ-сервере впритык, но после накопления трейсов
+          # ClickHouse стал ловить OOM-kill (exit 137) на старте при загрузке
+          # данных. После апгрейда до 8ГБ даём честные 2ГБ.
+          memory: 2G
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CH_PASSWORD:-langfuse}
+    volumes:
+      - lf_clickhouse_data:/var/lib/clickhouse
+      - lf_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  lf-minio:
+    # официальный образ с Docker Hub: cgr.dev/chainguard/minio из апстрима
+    # требует docker login и отдаёт 403 анонимно
+    image: docker.io/minio/minio:latest
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    entrypoint: sh
+    # бакет создаём заранее: сам Langfuse его не создаёт и падает на первом трейсе
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+    volumes:
+      - lf_minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  lf-redis:
+    image: docker.io/redis:7
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+    command: --requirepass langfuse-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "langfuse-redis", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  lf-postgres:
+    image: docker.io/postgres:17
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_PG_PASSWORD:-langfuse}
+    volumes:
+      - lf_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  lf_postgres_data:
+  lf_clickhouse_data:
+  lf_clickhouse_logs:
+  lf_minio_data:

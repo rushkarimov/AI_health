@@ -1,0 +1,15 @@
+# Источник данных появляется сам при старте: иначе после down -v его пришлось
+# бы добавлять через интерфейс руками.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # uid задаём явно: без него Grafana генерирует случайный (PBFA97CFB...),
+    # а панели дашборда ссылаются на источник по uid — и все графики
+    # показывали «No data», хотя данные в Prometheus были.
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

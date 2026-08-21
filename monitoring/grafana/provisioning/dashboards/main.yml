@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: health-bot
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    # правки через интерфейс не переживут перезапуск: дашборд описан файлом,
+    # и это осознанно — так он лежит в репозитории вместе с кодом
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

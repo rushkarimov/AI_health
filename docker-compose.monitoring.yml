@@ -1,0 +1,92 @@
+# Prometheus + Grafana — технические и продуктовые метрики бота.
+#
+#   docker compose -f docker-compose.monitoring.yml up -d
+#   открыть http://ХОСТ:3001 (admin / пароль из GRAFANA_PASSWORD)
+#
+# Остановить, сохранив данные:  docker compose -f docker-compose.monitoring.yml stop
+# Удалить вместе с данными:     docker compose -f docker-compose.monitoring.yml down -v
+#
+# Почему отдельный файл, а не сервисы в основном docker-compose.yml: бот должен
+# подниматься без мониторинга. Упавшая Grafana не должна мешать записи еды.
+#
+# Про ресурсы. На сервере 3.8 ГБ RAM и 2 ядра, из них ~1 ГБ уже занят ботом,
+# api и Postgres. Поэтому:
+#   * лимиты памяти выставлены явно — при утечке контейнер умрёт сам, а не
+#     потянет за собой бота через OOM killer;
+#   * метрики храним долго (10 лет), но с потолком по размеру — иначе диск
+#     кончится молча и утянет за собой Postgres с едой;
+#   * Loki и агент логов не ставим — логи смотрим через docker compose logs.
+#
+# Порты 3001 и 9090: 3000 занят Langfuse, если он когда-нибудь поднимется.
+
+name: monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Хранение: 10 лет по времени — фактически «всегда», но не бесконечность.
+      #
+      # Почему не retention=0 (без ограничения): Prometheus писал бы, пока не
+      # кончится диск, а вместе с диском встал бы Postgres с едой и весом —
+      # и бот целиком. Ограничение по размеру страхует от этого.
+      #
+      # 4 ГБ хватает с запасом: 20 серий по 30 секунд дают ~75 КБ в сутки,
+      # то есть ~27 МБ в год. Даже при десятикратном росте метрик лимит
+      # упрётся не раньше чем через несколько лет.
+      - --storage.tsdb.retention.time=3650d
+      - --storage.tsdb.retention.size=4GB
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    networks:
+      - default
+      - healthbot
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Анонимный доступ выключен: дашборд открыт наружу через туннель, и без
+      # пароля его увидел бы любой, кто узнает адрес.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Аналитика Grafana наружу не нужна и лишний раз стучится в интернет
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      # Провижининг: источник данных и дашборд появляются сами, без ручной
+      # настройки через интерфейс — иначе после down -v всё пришлось бы
+      # собирать заново.
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+networks:
+  # Сеть бота как внешняя: Prometheus должен видеть api по имени контейнера,
+  # чтобы забирать /metrics без выхода в интернет.
+  healthbot:
+    external: true
+    name: health-bot_default
+
+volumes:
+  prom_data:
+  grafana_data:
