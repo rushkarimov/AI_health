@@ -60,7 +60,7 @@
 
 ### 📲 Приложение
 
-<img src="docs/images/app-chat.jpg" width="175"> <img src="docs/images/app-eat.jpg" width="175"> <img src="docs/images/app-burn.jpg" width="175"> <img src="docs/images/app-health.jpg" width="175"> <img src="docs/images/app-advice.jpg" width="175">
+<img src="docs/images/app-chat.jpg" width="150"> <img src="docs/images/app-eat.jpg" width="150"> <img src="docs/images/app-burn.jpg" width="150"> <img src="docs/images/app-health.jpg" width="150"> <img src="docs/images/app-advice.jpg" width="150">
 
 **Чат** — вопрос по своим данным · **Еда** — приёмы за день · **Активность** — графики за период · **Здоровье** — готовность, HRV, сон · **Советы** — возможности и цель
 
